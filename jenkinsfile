@@ -1,0 +1,114 @@
+pipeline {
+  agent any
+
+  environment {
+    TF_DIR = 'terraform'
+    ANSIBLE_DIR = 'ansible'
+  }
+
+  // Credentials to set in Jenkins:
+  // - aws-jenkins-creds : AWS access key (use with withCredentials or plugin)
+  // - github-deploy-key : SSH private key for repo checkout (if needed)
+  // - ansible-ssh-key-id : SSH private key for connecting to EC2 (the private key B)
+  stages {
+
+    stage('Checkout') {
+      steps {
+        // If you use SSH credential for Git checkout:
+        sshagent(['github-deploy-key']) {
+          checkout scm
+        }
+      }
+    }
+
+    stage('Terraform Init & Plan') {
+      steps {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', 
+                         accessKeyVariable: 'AWS_ACCESS_KEY_ID', 
+                         secretKeyVariable: 'AWS_SECRET_ACCESS_KEY', 
+                         credentialsId: 'aws-jenkins-creds']]) {
+          dir("${TF_DIR}") {
+            sh 'terraform init -input=false'
+            sh 'terraform plan -out=tfplan -input=false'
+            sh 'terraform show -json tfplan > tfplan.json || true'
+          }
+        }
+      }
+    }
+
+    stage('Terraform Apply') {
+      steps {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', 
+                         accessKeyVariable: 'AWS_ACCESS_KEY_ID', 
+                         secretKeyVariable: 'AWS_SECRET_ACCESS_KEY', 
+                         credentialsId: 'aws-jenkins-creds']]) {
+          dir("${TF_DIR}") {
+            // Provide variables: instance_ami, my_ip_cidr, and ssh_public_key must be passed
+            // The ANSIBLE public key content should be stored as Jenkins secret text and injected
+            withCredentials([string(credentialsId: 'ansible-public-key', variable: 'ANSIBLE_PUB_KEY')]) {
+              sh '''
+                terraform apply -auto-approve -var="ssh_public_key=${ANSIBLE_PUB_KEY}" \
+                                  -var="my_ip_cidr=${MY_IP_CIDR}" \
+                                  -var="instance_ami=${AMI}"
+              '''
+            }
+            sh 'terraform output -json > ../tf_outputs.json'
+          }
+        }
+      }
+    }
+
+    stage('Generate Ansible Inventory') {
+      steps {
+        dir("${WORKSPACE}") {
+          // read terraform outputs (json produced)
+          sh '''
+            PY_IP=$(jq -r .instance_public_ip.value tf_outputs.json)
+            echo "[web]" > ${ANSIBLE_DIR}/inventory
+            echo "$PY_IP ansible_user=${ANSIBLE_USER:-ec2-user} ansible_ssh_private_key_file=${ANSIBLE_DIR}/keys/jenkins_ansible_ec2" >> ${ANSIBLE_DIR}/inventory
+            echo "Created inventory with $PY_IP"
+          '''
+          // Create keys folder and write private key from Jenkins credentials
+          sh 'mkdir -p ${ANSIBLE_DIR}/keys'
+          // retrieve private key B from Jenkins credentials and write it to file
+          withCredentials([sshUserPrivateKey(credentialsId: 'ansible-ssh-key-id', keyFileVariable: 'ANSIBLE_KEYFILE', usernameVariable: 'ANSIBLE_USER')]) {
+            sh '''
+              cp ${ANSIBLE_KEYFILE} ${ANSIBLE_DIR}/keys/jenkins_ansible_ec2
+              chmod 600 ${ANSIBLE_DIR}/keys/jenkins_ansible_ec2
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Ansible: Configure Webserver') {
+      steps {
+        dir("${ANSIBLE_DIR}") {
+          sh 'ansible-playbook -i inventory site.yml --ssh-extra-args="-o StrictHostKeyChecking=no"'
+        }
+      }
+    }
+
+    stage('Test Access') {
+      steps {
+        // get public ip and print url
+        sh '''
+          IP=$(jq -r .instance_public_ip.value tf_outputs.json)
+          echo "Web server should be reachable at http://$IP/"
+          # quick curl test (non-failing) to show content
+          echo "CURL output:"
+          curl -sS http://$IP || true
+        '''
+      }
+    }
+  } // stages
+
+  post {
+    always {
+      archiveArtifacts artifacts: 'tf_outputs.json', allowEmptyArchive: true
+    }
+    failure {
+      echo 'Pipeline failed. Check logs.'
+    }
+  }
+}

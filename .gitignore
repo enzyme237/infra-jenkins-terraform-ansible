@@ -1,0 +1,15 @@
+*.env
+*.key
+node_modules/
+dist/
+build/
+*.log
+.cache/
+node_modules/
+npm-debug.log
+ansible/keys/
+terraform/.terraform/
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+.tfplan
+*.pem
