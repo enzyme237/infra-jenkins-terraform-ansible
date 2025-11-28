@@ -1,0 +1,2 @@
+[web]
+34.239.226.117 ansible_user=ubuntu ansible_ssh_private_key_file=/home/chris/.ssh/jenkins_ansible_ec2

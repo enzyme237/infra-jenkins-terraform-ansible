@@ -69,8 +69,10 @@ variable "my_ip_cidr" {
 # Key pair from public key content
 resource "aws_key_pair" "ansible_key" {
   key_name   = "jenkins_ansible_key"
-  public_key = var.ssh_public_key
+  public_key = file(var.ssh_public_key_path)
 }
+
+
 
 # EC2 instance
 resource "aws_instance" "web" {
